@@ -1,5 +1,5 @@
 seed: 42
-dataset: split_cifar100
+dataset: cifar100
 num_tasks: 2
 classes_per_task: 10
 backbone: vit_base_patch16_224
@@ -12,6 +12,6 @@ lr: 0.001
 optimizer: adam
 batch_size: 16
 epochs_per_task: 1
-checkpoint_path: checkpoints/l2p
-data_root: ./data
+checkpoint_path: ./../../checkpoints/l2p
+data_root: ./../../data
 num_workers: 0

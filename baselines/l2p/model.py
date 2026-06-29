@@ -76,7 +76,8 @@ class L2PModel(nn.Module):
         tokens = tokens + self.backbone.pos_embed
 
         # Use CLS token embedding (before any block) as the query vector
-        query = tokens[:, 0]  # (B, D)
+        features = self.backbone.forward_features(x)
+        query = features[:, 0]  # (B, D)
 
         # Step 2: get selected prompts and pull loss
         selected_prompts, pull_loss = self.prompt_pool(query)
@@ -88,7 +89,15 @@ class L2PModel(nn.Module):
 
         tokens = self.backbone.norm(tokens)
         # CLS token is shifted right by the number of prepended prompt tokens
-        cls_out = tokens[:, self.cfg['top_k'] * self.cfg['prompt_length']]
+        # cls_out = tokens[:, self.cfg['top_k'] * self.cfg['prompt_length']]
+        prompt_tokens = tokens[:, :self.cfg['top_k']*self.cfg['prompt_length']]
 
-        logits = self.head(cls_out) if self.head is not None else cls_out
+        pooled = prompt_tokens.mean(dim=1)
+
+        if self.head is None:
+            logits = pooled
+        else:
+            logits = self.head(pooled)
+
+        # logits = self.head(cls_out) if self.head is not None else cls_out
         return logits, pull_loss

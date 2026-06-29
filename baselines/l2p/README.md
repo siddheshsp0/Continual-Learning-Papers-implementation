@@ -1,4 +1,4 @@
-# L2P — Learning to Prompt for Continual Learning
+<!-- # L2P — Learning to Prompt for Continual Learning
 
 **Paper**: Learning to Prompt for Continual Learning  
 **arXiv**: https://arxiv.org/abs/2112.08654  
@@ -63,4 +63,6 @@ from model import L2PModel
 ckpt = torch.load('checkpoints/l2p/final.pt')
 model = L2PModel(ckpt['cfg'])
 model.load_state_dict(ckpt['model_state'])
-```
+``` -->
+
+

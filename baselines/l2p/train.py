@@ -6,12 +6,16 @@ import yaml
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
-import torchvision
-import torchvision.transforms as T
+from torch.utils.data import DataLoader
+from pathlib import Path
+import sys
 
 from model import L2PModel
 
+# Include datasets module's path
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+from datasets.builder import build_dataset
 
 def set_seed(seed: int):
     random.seed(seed)
@@ -20,33 +24,10 @@ def set_seed(seed: int):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
-
-
-def get_split_cifar100(root: str, num_tasks: int, classes_per_task: int):
-    mean = (0.5071, 0.4867, 0.4408)
-    std = (0.2675, 0.2565, 0.2761)
-    train_tf = T.Compose([
-        T.Resize(224),
-        T.RandomHorizontalFlip(),
-        T.ToTensor(),
-        T.Normalize(mean, std),
-    ])
-    test_tf = T.Compose([
-        T.Resize(224),
-        T.ToTensor(),
-        T.Normalize(mean, std),
-    ])
-    train_full = torchvision.datasets.CIFAR100(root, train=True, download=True, transform=train_tf)
-    test_full = torchvision.datasets.CIFAR100(root, train=False, download=True, transform=test_tf)
-
-    task_splits = []
-    for t in range(num_tasks):
-        classes = list(range(t * classes_per_task, (t + 1) * classes_per_task))
-        train_idx = [i for i, (_, y) in enumerate(train_full) if y in classes]
-        test_idx = [i for i, (_, y) in enumerate(test_full) if y in classes]
-        task_splits.append((Subset(train_full, train_idx), Subset(test_full, test_idx)))
-    return task_splits
-
+def seed_worker(worker_id):
+    worker_seed = torch.initial_seed() % 2**32
+    np.random.seed(worker_seed)
+    random.seed(worker_seed)
 
 def evaluate(model: L2PModel, loader: DataLoader, device: torch.device) -> float:
     model.eval()
@@ -61,11 +42,9 @@ def evaluate(model: L2PModel, loader: DataLoader, device: torch.device) -> float
     return 100.0 * correct / total
 
 
-def train_task(model: L2PModel, loader: DataLoader, cfg: dict, device: torch.device):
+def train_task(model: L2PModel, loader: DataLoader, optimizer, cfg: dict, device: torch.device):
     pull_w = cfg['pull_loss_weight']
     lr = cfg['lr']
-    params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.Adam(params, lr=lr)
     ce = nn.CrossEntropyLoss()
 
     model.train()
@@ -75,9 +54,9 @@ def train_task(model: L2PModel, loader: DataLoader, cfg: dict, device: torch.dev
             x, y = x.to(device), y.to(device)
             logits, pull_loss = model(x)
             loss = ce(logits, y) + pull_w * pull_loss
-            opt.zero_grad()
+            optimizer.zero_grad()
             loss.backward()
-            opt.step()
+            optimizer.step()
             total_loss += loss.item()
         print(f"  epoch {epoch+1}/{cfg['epochs_per_task']}  loss={total_loss/len(loader):.4f}")
 
@@ -85,27 +64,93 @@ def train_task(model: L2PModel, loader: DataLoader, cfg: dict, device: torch.dev
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', required=True)
+    parser.add_argument(
+        "--resume",
+        type=str,
+        default=None,
+        help="Path to checkpoint to resume training from."
+    )
+    parser.add_argument(
+        "--eval",
+        action="store_true",
+        help="Run evaluation only."
+    )
+
+    parser.add_argument(
+        "--checkpoint",
+        type=str,
+        default=None,
+        help="Checkpoint to evaluate."
+    )
     args = parser.parse_args()
+    if args.eval and args.checkpoint is None:
+        raise ValueError(
+            "--checkpoint must be provided when using --eval"
+        )
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
 
     set_seed(cfg['seed'])
+    generator = torch.Generator()
+    generator.manual_seed(cfg["seed"])
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-    task_splits = get_split_cifar100(
-        cfg['data_root'], cfg['num_tasks'], cfg['classes_per_task']
-    )
+    task_splits = build_dataset(cfg)
+    num_workers = cfg.get('num_workers', 4)
 
     os.makedirs(cfg['checkpoint_path'], exist_ok=True)
 
     model = L2PModel(cfg, num_classes=cfg['classes_per_task'])
     model = model.to(device)
+    if args.eval:
+        total_classes = cfg["num_tasks"] * cfg["classes_per_task"]
+        model.grow_head(total_classes)
+        model = model.to(device)
+        checkpoint = torch.load(args.checkpoint, map_location=device)
+        model.load_state_dict(checkpoint["model_state"])
+        model.eval()
+        # Evaluate all tasks
+        for task_id in range(cfg["num_tasks"]):
+            _, test_set = task_splits[task_id]
+            test_loader = DataLoader(
+                test_set,
+                batch_size=cfg["batch_size"],
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=device.type == "cuda",
+                persistent_workers=False,
+                worker_init_fn=seed_worker,
+                generator=generator,
+            )
 
-    num_workers = cfg.get('num_workers', 4)
+            acc = evaluate(model, test_loader, device)
+            print(f"Task {task_id+1}: {acc:.2f}%")
+
+        return
+    start_task = 0
+    if args.resume is not None:
+        checkpoint = torch.load(args.resume, map_location=device)
+
+        start_task = checkpoint["task_id"] + 1
+        total_classes = start_task * cfg["classes_per_task"]
+
+        model.grow_head(total_classes)
+        model = model.to(device)
+        model.load_state_dict(checkpoint["model_state"])
+
+
+        print(f"Resuming from task {start_task}")
+    params = [p for p in model.parameters() if p.requires_grad]
+    optimizer = torch.optim.Adam(
+        params,
+        lr=cfg["lr"]
+    )
+    if args.resume is not None:
+        optimizer.load_state_dict(
+            checkpoint["optimizer_state"]
+        )
     task_accs: List[List[float]] = []  # task_accs[t][i] = acc on task i after training task t
-
-    for task_id in range(cfg['num_tasks']):
+    for task_id in range(start_task, cfg['num_tasks']):
         print(f"\n=== Task {task_id+1}/{cfg['num_tasks']} ===")
 
         total_classes = (task_id + 1) * cfg['classes_per_task']
@@ -114,17 +159,24 @@ def main():
 
         train_set, _ = task_splits[task_id]
         train_loader = DataLoader(
-            train_set, batch_size=cfg['batch_size'], shuffle=True,
-            num_workers=num_workers, pin_memory=True, persistent_workers=False
+            train_set,
+            batch_size=cfg["batch_size"],
+            shuffle=True,
+            num_workers=num_workers,
+            pin_memory=device.type == "cuda",
+            persistent_workers=False,
+            worker_init_fn=seed_worker,
+            generator=generator,
         )
 
-        train_task(model, train_loader, cfg, device)
+        train_task(model, train_loader, optimizer, cfg, device)
 
         # checkpoint
         ckpt_path = os.path.join(cfg['checkpoint_path'], f'task_{task_id+1}.pt')
         torch.save({
             'task_id': task_id,
             'model_state': model.state_dict(),
+            "optimizer_state": optimizer.state_dict(),
             'cfg': cfg,
         }, ckpt_path)
 
@@ -133,8 +185,14 @@ def main():
         for prev_t in range(task_id + 1):
             _, test_set = task_splits[prev_t]
             test_loader = DataLoader(
-                test_set, batch_size=cfg['batch_size'], shuffle=False,
-                num_workers=num_workers, pin_memory=True, persistent_workers=False
+                test_set,
+                batch_size=cfg["batch_size"],
+                shuffle=False,
+                num_workers=num_workers,
+                pin_memory=device.type == "cuda",
+                persistent_workers=False,
+                worker_init_fn=seed_worker,
+                generator=generator,
             )
             acc = evaluate(model, test_loader, device)
             accs.append(acc)
@@ -156,7 +214,7 @@ def main():
     print(f"Average Accuracy : {avg_acc:.2f}%")
     print(f"Average Forgetting: {avg_forgetting:.2f}%")
 
-    torch.save({'model_state': model.state_dict(), 'cfg': cfg},
+    torch.save({'model_state': model.state_dict(),"optimizer_state": optimizer.state_dict(), 'cfg': cfg},
                os.path.join(cfg['checkpoint_path'], 'final.pt'))
 
 
