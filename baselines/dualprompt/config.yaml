@@ -1,17 +1,19 @@
 seed: 42
-dataset: split_cifar100
+dataset: cifar100
 num_tasks: 10
 classes_per_task: 10
 backbone: vit_base_patch16_224
 g_prompt_length: 5
 e_prompt_length: 20
 g_prompt_layers: [0, 1]
-e_prompt_layers: [2, 3]
+e_prompt_layers: [2, 4]
 e_pool_size: 10
 embedding_dim: 768
 lr: 0.001
-optimizer: adam
-batch_size: 64
+beta1: 0.9 # For adam
+beta2: 0.999 # For adam
+batch_size: 2
+lambda: 1.0
 epochs_per_task: 20
-checkpoint_path: checkpoints/dualprompt
-data_root: ./data
+checkpoint_path: ../../checkpoints/dualprompt
+data_root: ../../data

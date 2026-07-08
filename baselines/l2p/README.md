@@ -1,5 +1,5 @@
-Paper: LearningToPrompt (L2P)
+**Paper**: LearningToPrompt (L2P)
 
-Training: python train.py --config config.yaml
-Resume training: python train.py --config config.yaml --resume checkpoint_id
-Evaluation: python train.py --config config.yaml --eval --checkpoint checkpoint_id
+**Training**: python train.py --config config.yaml
+**Resume training**: python train.py --config config.yaml --resume checkpoint_id
+**Evaluation**: python train.py --config config.yaml --eval --checkpoint checkpoint_id
